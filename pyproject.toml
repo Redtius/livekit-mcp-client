@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "livekit-mcp-client"
+version = "0.1.0"
+description = "Allows you to connect to an MCP server and use its tools directly in LiveKit with AI-callable functions."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+  { name="Reda Mountassir", email="you@example.com" }
+]
+dependencies = [livekit-agents,python-dotenv,mcp,RestrictedPython]
+
+[project.urls]
+"Github" = "https://github.com/Redtius/livekit-mcp-client"
+

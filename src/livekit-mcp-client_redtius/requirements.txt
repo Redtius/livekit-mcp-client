@@ -1,11 +1,4 @@
-livekit-agents>=0.12.18,<1.0.0
+livekit-agents
 python-dotenv
-logger
-livekit
 mcp
-asyncio
-contextlib2
-typing
-logger
-mcp[cli]
-httpx
+RestrictedPython
