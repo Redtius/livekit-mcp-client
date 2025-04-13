@@ -1,4 +1,0 @@
-livekit-agents
-python-dotenv
-mcp
-RestrictedPython

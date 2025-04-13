@@ -9,10 +9,39 @@ description = "Allows you to connect to an MCP server and use its tools directly
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
-  { name="Reda Mountassir", email="you@example.com" }
+  { name="Reda Mountassir", email="reda.mountassir5@gmail.com" }
 ]
-dependencies = [livekit-agents,python-dotenv,mcp,RestrictedPython]
+
+dependencies = [
+    "livekit-agents",
+    "python-dotenv",
+    "mcp",
+    "RestrictedPython",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache 2.0",
+    "Operating System :: OS Independent",
+]
 
 [project.urls]
 "Github" = "https://github.com/Redtius/livekit-mcp-client"
+
+
+[project.optional-dependencies]
+test = [
+   "pytest",
+   "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+python_files = "tests.py test_*.py *_test.py *test.py"
+testpaths = [
+    "tests",
+]
 

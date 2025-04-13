@@ -2,7 +2,7 @@ from .types import (
   Protocol,
   SSEClientStreams,
 )
-from .mcpclient import MCPClient
+from .clients.mcpclient import MCPClient
 
 __all__ = [
     'Protocol',
