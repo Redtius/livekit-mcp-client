@@ -1,6 +1,7 @@
 import keyword
 import re
 
+
 # JSON type mapper
 def translate_type(json_type: str):
     return {
@@ -9,8 +10,9 @@ def translate_type(json_type: str):
         "integer": int,
         "boolean": bool,
         "object": dict,
-        "array": list
+        "array": list,
     }.get(json_type, str)
+
 
 def sanitize_name(name: str) -> str:
     """
@@ -24,18 +26,18 @@ def sanitize_name(name: str) -> str:
         raise TypeError(f"Expected string, got {type(name).__name__}")
 
     # Replaces all non-alphanumeric chars (except underscores) with '_'
-    safe = re.sub(r'[^0-9a-zA-Z_]', '_', name)
+    safe = re.sub(r"[^0-9a-zA-Z_]", "_", name)
 
     # Prepends '_' if the name starts with a digit
     if safe and safe[0].isdigit():
-        safe = '_' + safe
+        safe = "_" + safe
 
     # Avoids Python keywords/reserved names
     if keyword.iskeyword(safe):
-        safe += '_'
+        safe += "_"
 
     # Ensures the name isn't empty after sanitization
     if not safe:
-        safe = '_empty'
+        safe = "_empty"
 
     return safe

@@ -5,6 +5,7 @@ from contextlib import AsyncExitStack
 import asyncio
 from typing import Optional
 
+
 class SSEConnector(BaseConnector):
     def __init__(self, url: str):
         self._url = url

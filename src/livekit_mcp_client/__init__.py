@@ -1,11 +1,6 @@
 from .types import (
-  Protocol,
-  SSEClientStreams,
+    SSEClientStreams,
 )
 from .clients.mcpclient import MCPClient
 
-__all__ = [
-    'Protocol',
-    'SSEClientStreams',
-    'MCPClient'
-]
+__all__ = ["SSEClientStreams", "MCPClient"]

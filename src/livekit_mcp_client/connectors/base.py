@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+
 class BaseConnector(ABC):
     """Interface that all protocol-specific connectors must implement."""
 

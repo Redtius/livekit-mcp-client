@@ -1,17 +1,29 @@
-# tests/conftest.py
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 
 try:
     from mcp import ClientSession
 except ImportError:
+
     class ClientSessionSpec:
-        async def __aenter__(self): pass
-        async def __aexit__(self, exc_type, exc_val, exc_tb): pass
-        async def initialize(self): pass
-        async def send_ping(self): pass
-        async def list_tools(self): pass
-        async def call_tool(self, tool_name, kwargs): pass
+        async def __aenter__(self):
+            pass
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def send_ping(self):
+            pass
+
+        async def list_tools(self):
+            pass
+
+        async def call_tool(self, tool_name, kwargs):
+            pass
+
     ClientSession = ClientSessionSpec
     print("Warning: Failed to import real ClientSession, using fallback spec.")
 

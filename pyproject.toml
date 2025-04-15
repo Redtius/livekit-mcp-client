@@ -16,7 +16,7 @@ dependencies = [
     "livekit-agents",
     "python-dotenv",
     "mcp",
-    "RestrictedPython",
+    "pydantic >=2.11.3"
 ]
 
 classifiers = [
