@@ -37,9 +37,7 @@ class SchemaReaderV3:
 
     def __init__(self):
         """Initializes the SchemaReaderV3."""
-        # Cache for generated model objects, keyed by the intended model name.
         self._created_models_cache: Dict[str, Type[PydanticBaseModel]] = {}
-        # Stack to track model names currently being processed. Used for detecting and preventing infinite recursion in case of circular $ref definitions.
         self._processing_stack: List[str] = []
 
     def _clear_state(self):
@@ -84,10 +82,6 @@ class SchemaReaderV3:
             return bool
         elif schema_type == "null":
             return type(None)
-        # Could be used to enforce typing:
-        # elif schema_type == "random_type":
-        #     raise SchemaUnsupportedTypeError(schema_type, schema_format, context="random type not supported")
-        # We can do a technique to handle these cases
 
         logger.warning(
             f"Unmapped JSON schema type: {schema_type}, format: {schema_format}. Defaulting to Any."
@@ -129,14 +123,9 @@ class SchemaReaderV3:
                                           (and ForwardRef is not being used or fails).
             Any exception raised during recursive calls to `_create_model_from_schema`.
         """
-        # Initialize assuming the type might allow null (still not used properly)
-        # contains_null: bool = False
-        # Default Python type fallback
         field_type: Type = Any
-        # Pydantic's marker for required fields when initializing FieldInfo
         field_default: Any = ...
 
-        # --- Validate Input ---
         if not isinstance(prop_schema, dict):
             raise InvalidSchemaTypeError(
                 expected_type="dict",
@@ -144,20 +133,17 @@ class SchemaReaderV3:
                 context=f"Property schema for '{prop_name_hint}'",
             )
 
-        # --- 1. Handle $ref Resolution ---
         if "$ref" in prop_schema:
             ref_path = prop_schema["$ref"]
             ref_name = ref_path.split("/")[-1]
 
             if ref_name in self._created_models_cache:
-                # If already created, use cached model/ref
                 field_type = self._created_models_cache[ref_name]
                 logger.debug(
                     f"Using cached model/ref for '$ref': '{ref_path}' -> '{ref_name}'"
                 )
 
             elif ref_name in definitions:
-                # Referenced definition exists, ensure the model is created (recursive)
                 logger.debug(
                     f"Resolving $ref '{ref_path}' by creating/getting model '{ref_name}'"
                 )
@@ -168,32 +154,22 @@ class SchemaReaderV3:
                     definitions=definitions,
                 )
             else:
-                # Reference target not found in definitions
                 raise SchemaRefResolutionError(
                     ref_path=ref_path, context=f"Property '{prop_name_hint}'"
                 )
 
-        # --- 2. Handle Explicit Types (if not a $ref) ---
         else:
             json_type = prop_schema.get("type")
             json_format = prop_schema.get("format")
 
-            # --- 2a. Union Types (e.g., type: ["string", "null"]) ---
             if isinstance(json_type, list):
                 py_types = []
-                # Check if 'null' is part of the union, affecting optionality logic later
-                # if "null" in json_type:
-                #     contains_null = True  # still not used properly
-
-                # Process each non-null type in the list
                 for t in json_type:
                     if t == "null":
                         continue
-                    # Create a temporary schema for processing this specific type, This avoids modifying the original schema if it's complex
                     sub_schema = prop_schema.copy()
                     sub_schema["type"] = t
 
-                    # Recursively get the Python type for this sub-schema, We only need the type here, not the full Field info for the union constituents
                     sub_type, _ = self._schema_to_pydantic_field(
                         sub_schema,
                         f"{prop_name_hint}_{t}",
@@ -203,7 +179,6 @@ class SchemaReaderV3:
                     )
                     py_types.append(sub_type)
 
-                # Combine the processed Python types into a Union or single type
                 unique_py_types = tuple(sorted(list(set(py_types)), key=str))
                 if not unique_py_types:
                     field_type = type(None)
@@ -212,17 +187,13 @@ class SchemaReaderV3:
                 else:
                     field_type = Union[unique_py_types]
 
-            # --- 2b. Object Type (Nested Model) ---
             elif json_type == "object":
-                # Check if properties are defined, otherwise treat as generic dict
                 if "properties" in prop_schema:
-                    # Generate a unique name for the nested model based on the property hint
                     nested_model_name = self._generate_unique_model_name(prop_name_hint)
                     logger.debug(
                         f"Creating nested model '{nested_model_name}' for property '{prop_name_hint}'"
                     )
 
-                    # Recursively create the Pydantic model object for the nested structure
                     field_type = self._create_model_from_schema(
                         model_name=nested_model_name,
                         schema=prop_schema,
@@ -230,19 +201,16 @@ class SchemaReaderV3:
                         definitions=definitions,
                     )
                 else:
-                    # Object type with no properties defined
                     logger.debug(
                         f"Object property '{prop_name_hint}' has no 'properties' defined. Defaulting to Dict[str, Any]."
                     )
                     field_type = Dict[str, Any]
 
-            # --- 2c. Array Type ---
             elif json_type == "array":
                 items_schema = prop_schema.get("items")
                 item_type: Type = Any
 
                 if items_schema is None:
-                    # Array schema must have an 'items' definition
                     raise InvalidSchemaStructureError(
                         structure_element="items",
                         expected_type="dict/object",
@@ -250,7 +218,6 @@ class SchemaReaderV3:
                         context=f"Array property '{prop_name_hint}'",
                     )
                 elif isinstance(items_schema, dict):
-                    # Recursively determine the type for the array items
                     item_type, _ = self._schema_to_pydantic_field(
                         items_schema,
                         f"{prop_name_hint}_item",
@@ -259,39 +226,27 @@ class SchemaReaderV3:
                         True,
                     )
                 else:
-                    # 'items' exists but is not a valid schema object
                     raise InvalidSchemaTypeError(
                         expected_type="dict",
                         actual_type=items_schema,
                         context=f"Array 'items' definition for '{prop_name_hint}'",
                     )
 
-                # Final type is List[<resolved_item_type>]
                 field_type = List[item_type]
 
-            # --- 2d. Primitive Type ---
             elif isinstance(json_type, str):
                 field_type = self._map_json_type_to_python(json_type, json_format)
 
-                # if field_type is type(None):
-                #     contains_null = True
-
-            # --- 2e. Fallback (Unknown or Missing Type) ---
             else:
-                # Handle cases where 'type' is missing or is an unsupported value
                 raise SchemaUnsupportedTypeError(
                     json_type=json_type,
                     json_format=json_format,
                     context=f"Property '{prop_name_hint}'",
                 )
 
-        # --- 3. Handle Optionality and Defaults based on 'required' status ---
         if not is_required:
-            # Property is OPTIONAL
-            ## Get default value from schema, fallback to None if not specified
             field_default = prop_schema.get("default", None)
 
-            ## Ensure the Python type hint includes Optional unless it already does
             is_already_optional = (
                 field_type is Any
                 or (
@@ -304,30 +259,14 @@ class SchemaReaderV3:
             if not is_already_optional:
                 field_type = Optional[field_type]
 
-        # elif contains_null:
-        # Property is REQUIRED, but the schema explicitly allows 'null' as a type.
-        # The default remains '...' (required marker). Pydantic handles this correctly.
-        # No need to wrap in Optional[], the Union type already handles None possibility.
-        # pass
-
-        # --- 4. Create Pydantic Field Object ---
-        # This object holds the default value and other schema metadata like description.
         try:
             field_info = PydanticField(
                 default=field_default,
                 description=prop_schema.get("description"),
                 title=prop_schema.get("title"),
-                # examples=prop_schema.get("examples"),
-                # min_length=prop_schema.get("minLength"),
-                # max_length=prop_schema.get("maxLength"),
-                # pattern=prop_schema.get("pattern"),
-                # ge=prop_schema.get("minimum"),
-                # le=prop_schema.get("maximum"),
-                # multiple_of=prop_schema.get("multipleOf"),
                 # TODO: Add more mappings as needed based on supported schema keywords
             )
         except TypeError as field_exc:
-            # Catch errors during Field() creation itself
             raise InvalidSchemaStructureError(
                 structure_element="schema constraints",
                 expected_type="valid Pydantic Field arguments",
@@ -356,13 +295,11 @@ class SchemaReaderV3:
         capitalized_base = "".join(
             word.capitalize() for word in sanitized_base.split("_") if word
         )
-        # Handle cases where sanitization results in empty string or just underscores
         if not capitalized_base:
             capitalized_base = "Unnamed"
 
         model_name = f"{capitalized_base}Model"
         count = 1
-        # Ensure name is unique against both completed models and models currently being processed
         while (
             model_name in self._created_models_cache
             or model_name in self._processing_stack
@@ -400,34 +337,25 @@ class SchemaReaderV3:
                          via `_schema_to_pydantic_field`.
             Any Exception raised by `pydantic.create_model` if the final field definitions are invalid.
         """
-        # Check cache first
         if model_name in self._created_models_cache:
             return self._created_models_cache[model_name]
 
-        # Check for circular references before proceeding
         if model_name in self._processing_stack:
-            # Use ForwardRef to handle resolvable cycles
             logger.warning(
                 f"Circular reference detected for model '{model_name}'. Using ForwardRef."
             )
-            # Store the ForwardRef in the cache immediately so recursive calls find it
             forward_ref_type = ForwardRef(f"'{model_name}'")
             self._created_models_cache[model_name] = forward_ref_type
             return forward_ref_type
-            # if strict cycle detection is needed !
-            # raise SchemaCircularReferenceError(model_name=model_name)
 
         logger.info(f"Creating Pydantic model object: '{model_name}'")
-        # Add to stack before processing properties to detect self-references
         self._processing_stack.append(model_name)
 
         try:
-            # Prepare dictionary to hold field definitions for create_model
             fields: Dict[str, PydanticFieldInfo] = {}
             required_props = set(schema.get("required", []))
             properties = schema.get("properties", {})
 
-            # Validate 'properties' structure
             if not isinstance(properties, dict):
                 raise InvalidSchemaStructureError(
                     structure_element="properties",
@@ -494,7 +422,6 @@ class SchemaReaderV3:
             )
             raise
         except Exception as e:
-            # Catch any other unexpected errors during model creation
             logger.error(
                 f"Failed during creation of Pydantic model '{model_name}': {type(e).__name__} - {e}",
                 exc_info=True,
@@ -504,7 +431,6 @@ class SchemaReaderV3:
             ) from e
 
         finally:
-            # Ensure the model name is removed from the processing stack when exiting this function, regardless of whether it succeeded or failed.
             if self._processing_stack and self._processing_stack[-1] == model_name:
                 self._processing_stack.pop()
 
@@ -543,9 +469,6 @@ class SchemaReaderV3:
             InvalidSchemaTypeError: If `input_schema` is not a dictionary or not `type: object`.
             SchemaError: (Or subclasses) If any error occurs during schema processing or model creation.
         """
-        # self._clear_state()
-
-        # --- Validate top-level schema ---
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
             raise InvalidSchemaTypeError(
                 expected_type="object schema dictionary",
@@ -553,8 +476,6 @@ class SchemaReaderV3:
                 context=f"Tool '{tool_name}' input",
             )
 
-        # --- Generate Model ---
-        # Generate a unique name for the main input model for this tool
         main_model_name = self._generate_unique_model_name(f"{tool_name}_Input")
 
         # Create the main Pydantic model object
@@ -565,26 +486,26 @@ class SchemaReaderV3:
             definitions=definitions,
         )
 
-        # --- Generate Parameter Map ---
         param_map: Dict[str, str] = {}
+        model_fields = getattr(main_input_model, 'model_fields', {})
+
+        for field_py_name, field_obj in model_fields.items():
+            field_alias = getattr(field_obj, 'alias', None)
+
+            original_name = field_alias if field_alias is not None else field_py_name
+            param_map[field_py_name] = original_name
+
+        logger.debug(f"Final param_map for {main_model_name}: {param_map}")
+
         properties = input_schema.get("properties", {})
         if isinstance(properties, dict):
-            model_fields = getattr(main_input_model, "model_fields", {})
-            # Create reverse mapping: original_name -> final_python_name
-            reverse_map = {}
-            for field_py_name, field_obj in model_fields.items():
-                original_name = getattr(field_obj, "alias", field_py_name)
-                reverse_map[original_name] = field_py_name
-
-            for orig_name in properties.keys():
-                if orig_name in reverse_map:
-                    final_field_name = reverse_map[orig_name]
-                    param_map[final_field_name] = orig_name
-                else:
-                    # This might happen if a property was skipped due to sanitization issues.
+            mapped_original_names = set(param_map.values())
+            for orig_name_from_schema in properties.keys():
+                if orig_name_from_schema not in mapped_original_names:
                     logger.warning(
-                        f"Could not map original param '{orig_name}' to a field in model '{main_model_name}'. It might have been skipped or renamed unexpectedly."
-                    )
+                        f"Property '{orig_name_from_schema}' from input schema was not found "
+                        f"as a field or alias value in the final model '{main_model_name}'. "
+                        f"Was it skipped or renamed unexpectedly?")
 
         return main_input_model, param_map
 

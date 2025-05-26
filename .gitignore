@@ -81,7 +81,7 @@ target/
 # IPython
 profile_default/
 ipython_config.py
-requirements.txt
+src/livekit_mcp_client/requirements.txt
 todo.txt
 temp*
 

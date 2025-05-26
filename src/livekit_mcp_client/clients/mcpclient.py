@@ -1,13 +1,12 @@
-# --- START OF FILE mcpclient.py ---
-
 from typing import Optional, Any, Callable, Dict, Type, List
 from contextlib import AsyncExitStack
 import logging
 import asyncio
 from dotenv import load_dotenv
+from livekit_mcp_client.clients.mcpcallable import MCPToolCallable
 
 from livekit_mcp_client.clients.schemav3 import SchemaReaderV3
-from livekit.agents.llm import ai_callable, FunctionContext
+from livekit.agents.llm.tool_context import FunctionTool,ToolContext,function_tool
 from mcp import ClientSession
 
 from livekit_mcp_client.exceptions import (
@@ -269,14 +268,13 @@ class MCPClient:
                 logger.error(
                     f"Connection error during tool '{tool_name}' execution: {conn_err}"
                 )
-                raise  # Re-raise connection errors
+                raise
             except Exception as call_error:
                 logger.error(
                     f"Error calling tool '{tool_name}': {call_error}", exc_info=True
                 )
                 raise ToolExecutionError(tool_name, call_error)
 
-        # Set function metadata
         dynamic_tool_wrapper.__name__ = sanitize_name(tool_name)
         dynamic_tool_wrapper.__doc__ = f"Dynamically generated wrapper for MCP tool: {tool_name}. Schema defined by {InputModel.__name__}."
         return dynamic_tool_wrapper
@@ -288,7 +286,7 @@ class MCPClient:
         input_schema: dict,
         reader_v3: SchemaReaderV3,  # V3 because i upgraded Schema reader 3 times ughh (1:too basic, 2:powerful but might induce vulnerabilities, 3:It speaks for itself ;) )
         all_definitions: Dict[str, Any],
-    ) -> Callable:
+    ) -> MCPToolCallable:
         """Generates a decorated, AI-callable function for a specific MCP tool.
 
         Args:
@@ -306,9 +304,8 @@ class MCPClient:
             ToolCreationError: If wrapper/decorator creation fails.
         """
         logger.debug(f"Starting creation process for tool: '{tool_name}'")
-        tool_desc = tool_desc or f"MCP tool: {tool_name} (Description unavailable)"
+        tool_desc_final = tool_desc or f"MCP tool: {tool_name} (Description unavailable)"
 
-        # Process Schema -> Pydantic Model Object
         try:
             InputModel, _ = reader_v3.process_tool_schema(
                 tool_name=tool_name,
@@ -332,42 +329,35 @@ class MCPClient:
                 tool_name, f"Schema processing failed unexpectedly: {e}"
             ) from e
 
-        # Create Wrapper Function Object
         try:
-            wrapper_method = self._create_tool_wrapper_func(
-                tool_name=tool_name, InputModel=InputModel
+            tool_callable_instance = MCPToolCallable(
+                client=self,
+                tool_name=tool_name,
+                description=tool_desc_final,
+                InputModel=InputModel
             )
-            logger.debug(f"Wrapper function created for '{tool_name}'.")
+            logger.info(f"Successfully created MCPToolCallable instance for: '{tool_name}'")
         except Exception as e:
-            logger.error(
-                f"Failed to create wrapper function for tool '{tool_name}': {e}",
-                exc_info=True,
-            )
-            raise ToolCreationError(
-                tool_name, f"Wrapper function creation failed: {e}"
-            ) from e
-
-        # Apply AI Callable Decorator
+            logger.error(f"Failed to instantiate MCPToolCallable for '{tool_name}': {e}", exc_info=True)
+            raise ToolCreationError(tool_name, f"Callable instance creation failed: {e}") from e
+        
         try:
-            decorated_method = ai_callable(
-                name=tool_name, description=tool_desc, input_model=InputModel
-            )(wrapper_method)
-            logger.debug(f"Applied ai_callable decorator to '{tool_name}'.")
+            decorated_tool = function_tool(
+                name=tool_name,
+                description=tool_desc_final
+            )(tool_callable_instance)
+
+            if not hasattr(decorated_tool, "__livekit_agents_ai_callable"):
+                logger.error(f"CRITICAL: Decorator failed to attach metadata for {tool_name}")
+                raise ToolCreationError(tool_name, "Decorator failed to attach metadata")
+            logger.info(f"Successfully created and decorated function tool for: '{tool_name}'")
+            return decorated_tool 
         except Exception as e:
-            logger.error(
-                f"Failed to apply ai_callable decorator for tool '{tool_name}': {e}",
-                exc_info=True,
-            )
-            raise ToolCreationError(
-                tool_name, f"Decorator application failed: {e}"
-            ) from e
+            logger.error(f"Failed to apply function_tool decorator for tool '{tool_name}': {e}", exc_info=True)
+            raise ToolCreationError(tool_name, f"Decorator application failed: {e}") from e
 
-        logger.info(
-            f"Successfully created tool object for: '{tool_name}' using model {InputModel.__name__}"
-        )
-        return decorated_method
 
-    async def create_function_context(self) -> FunctionContext:
+    async def create_tool_context(self) -> ToolContext:
         """Builds a FunctionContext containing methods for all MCP server tools.
 
         Fetches tools, processes schemas, creates wrappers, resolves references,
@@ -380,91 +370,93 @@ class MCPClient:
         Raises:
             MCPConnectionError: If listing tools from the server fails.
         """
-        logger.info(
-            "Fetching tools from MCP Server to build FunctionContext (SchemaReaderV3)..."
-        )
-        # Get tool definitions from server
         try:
-            session = self.get_session()
-            response = await session.list_tools()
+            logger.info(
+                "Fetching tools from MCP Server to build ToolContext..."
+            )
+            function_tools: List[FunctionTool] = []
+            # Get tool definitions from server
+            try:
+                session = self.get_session()
+                response = await session.list_tools()
+            except Exception as e:
+                logger.error(f"Failed to list tools from MCP server: {e}", exc_info=True)
+                raise MCPConnectionError(f"Failed to list tools from server: {e}") from e
+
+            methods: Dict[str, Callable] = {}
+            failed_tools: List[str] = []
+            successful_tools: int = 0
+            reader_v3 = SchemaReaderV3()
+            all_definitions = getattr(response, "definitions", {})
+            tools_list = getattr(response, "tools", [])
+
+            if not isinstance(tools_list, list):
+                logger.warning(
+                    "Server list_tools response did not contain a valid 'tools' list."
+                )
+                tools_list = []
+
+            # Process each tool definition
+            for tool in tools_list:
+                if not hasattr(tool, "name") or not hasattr(tool, "inputSchema"):
+                    logger.warning(
+                        f"Skipping invalid tool entry received from server: {getattr(tool, 'name', tool)}"
+                    )
+                    continue
+                tool_name = tool.name
+                logger.debug(f"Processing tool definition for: '{tool_name}'")
+                try:
+                    callable_instance = await self.create_mcp_tool(
+                        tool_name=tool_name,
+                        tool_desc=getattr(tool, "description", None),
+                        input_schema=tool.inputSchema,
+                        reader_v3=reader_v3,
+                        all_definitions=all_definitions,
+                    )
+                    # Add the instance (which conforms to FunctionTool protocol via hasattr check)
+                    function_tools.append(callable_instance)
+                    successful_tools += 1
+                except (SchemaError, ToolCreationError) as e:
+                    failed_tools.append(tool_name)
+                    logger.warning(
+                        f"Skipping tool '{tool_name}' due to error during V3 creation: {e}",
+                        exc_info=True,
+                    )
+                except Exception as e:
+                    failed_tools.append(tool_name)
+                    logger.error(
+                        f"Unexpected error skipping tool '{tool_name}': {e}", exc_info=True
+                    )
+            logger.debug("the issue is probably from resolving ForwardRef")
+            # Post-Processing: Resolve Forward References
+            all_created_models = reader_v3.get_created_models()
+            logger.debug(
+                f"Attempting to resolve forward references for {len(all_created_models)} models..."
+            )
+            for model_name, model in all_created_models.items():
+                try:
+                    if isinstance(model, type) and issubclass(model, PydanticBaseModel):
+                        if hasattr(model, "model_rebuild"):
+                            model.model_rebuild(force=True)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to resolve forward refs for model {model_name}: {type(e).__name__} - {e}",
+                        exc_info=False,
+                    )
+
+            if failed_tools:
+                sorted_failed_tools = sorted(failed_tools)
+                logger.warning(
+                    f"Skipped {len(sorted_failed_tools)} tools due to errors: {', '.join(sorted_failed_tools)}"
+                )
+
+            # Create and return the FunctionContext class instance
+            instance = ToolContext(tools=function_tools)
+            total_tools = len(tools_list)
+            logger.info(
+                f"FunctionContext built with {successful_tools}/{total_tools} tools."
+                f"{f' Skipped {len(failed_tools)}.' if failed_tools else ''}"
+            )
+            return instance
         except Exception as e:
-            logger.error(f"Failed to list tools from MCP server: {e}", exc_info=True)
-            raise MCPConnectionError(f"Failed to list tools from server: {e}") from e
-
-        methods: Dict[str, Callable] = {}
-        failed_tools: List[str] = []
-        successful_tools: int = 0
-        reader_v3 = SchemaReaderV3()
-        all_definitions = getattr(response, "definitions", {})
-        tools_list = getattr(response, "tools", [])
-
-        if not isinstance(tools_list, list):
-            logger.warning(
-                "Server list_tools response did not contain a valid 'tools' list."
-            )
-            tools_list = []
-
-        # Process each tool definition
-        for tool in tools_list:
-            if not hasattr(tool, "name") or not hasattr(tool, "inputSchema"):
-                logger.warning(
-                    f"Skipping invalid tool entry received from server: {getattr(tool, 'name', tool)}"
-                )
-                continue
-            tool_name = tool.name
-            logger.debug(f"Processing tool definition for: '{tool_name}'")
-            try:
-                # Create the callable method for this tool
-                method = await self.create_mcp_tool(
-                    tool_name=tool_name,
-                    tool_desc=getattr(tool, "description", None),
-                    input_schema=tool.inputSchema,
-                    reader_v3=reader_v3,
-                    all_definitions=all_definitions,
-                )
-                # Store method using sanitized name
-                methods[sanitize_name(tool_name)] = method
-                successful_tools += 1
-            except (SchemaError, ToolCreationError) as e:
-                failed_tools.append(tool_name)
-                logger.warning(
-                    f"Skipping tool '{tool_name}' due to error during V3 creation: {e}",
-                    exc_info=True,
-                )
-            except Exception as e:
-                failed_tools.append(tool_name)
-                logger.error(
-                    f"Unexpected error skipping tool '{tool_name}': {e}", exc_info=True
-                )
-
-        # Post-Processing: Resolve Forward References
-        all_created_models = reader_v3.get_created_models()
-        logger.debug(
-            f"Attempting to resolve forward references for {len(all_created_models)} models..."
-        )
-        for model_name, model in all_created_models.items():
-            try:
-                if isinstance(model, type) and issubclass(model, PydanticBaseModel):
-                    if hasattr(model, "model_rebuild"):
-                        model.model_rebuild(force=True)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to resolve forward refs for model {model_name}: {type(e).__name__} - {e}",
-                    exc_info=False,
-                )
-
-        if failed_tools:
-            sorted_failed_tools = sorted(failed_tools)
-            logger.warning(
-                f"Skipped {len(sorted_failed_tools)} tools due to errors: {', '.join(sorted_failed_tools)}"
-            )
-
-        # Create and return the FunctionContext class instance
-        MCPToolClass = type("MCPFunctionContext", (FunctionContext,), methods)
-        instance = MCPToolClass()
-        total_tools = len(tools_list)
-        logger.info(
-            f"FunctionContext built with {successful_tools}/{total_tools} tools."
-            f"{f' Skipped {len(failed_tools)}.' if failed_tools else ''}"
-        )
-        return instance
+            logger.error(f"Unexpected Error : {e}")
